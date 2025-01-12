@@ -1,42 +1,51 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:io' show File;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:video_player/video_player.dart';
 
 import '../utils.dart';
 import '../controller/story_controller.dart';
-
 class VideoLoader {
-  String url;
+  final String url;
+  final Map<String, dynamic>? requestHeaders;
+  LoadState state = LoadState.loading;
 
   File? videoFile;
-
-  Map<String, dynamic>? requestHeaders;
-
-  LoadState state = LoadState.loading;
 
   VideoLoader(this.url, {this.requestHeaders});
 
   void loadVideo(VoidCallback onComplete) {
-    if (this.videoFile != null) {
-      this.state = LoadState.success;
+    if (!kIsWeb) {
+      if (videoFile != null) {
+        state = LoadState.success;
+        onComplete();
+        return;
+      }
+
+      final fileStream = DefaultCacheManager().getFileStream(
+        url,
+        headers: requestHeaders as Map<String, String>?,
+      );
+
+      fileStream.listen((fileResponse) {
+        if (fileResponse is FileInfo) {
+          if (videoFile == null) {
+            state = LoadState.success;
+            videoFile = fileResponse.file;
+            onComplete();
+          }
+        }
+      }, onError: (error) {
+        state = LoadState.failure;
+        onComplete();
+      });
+    } else {
+      state = LoadState.success;
       onComplete();
     }
-
-    final fileStream = DefaultCacheManager()
-        .getFileStream(this.url, headers: this.requestHeaders as Map<String, String>?);
-
-    fileStream.listen((fileResponse) {
-      if (fileResponse is FileInfo) {
-        if (this.videoFile == null) {
-          this.state = LoadState.success;
-          this.videoFile = fileResponse.file;
-          onComplete();
-        }
-      }
-    });
   }
 }
 
@@ -46,14 +55,17 @@ class StoryVideo extends StatefulWidget {
   final Widget? loadingWidget;
   final Widget? errorWidget;
 
-  StoryVideo(this.videoLoader, {
+  const StoryVideo(
+    this.videoLoader, {
     Key? key,
     this.storyController,
     this.loadingWidget,
     this.errorWidget,
-  }) : super(key: key ?? UniqueKey());
+  }) : super(key: key);
 
-  static StoryVideo url(String url, {
+  /// Construtor de conveniência
+  static StoryVideo url(
+    String url, {
     StoryController? controller,
     Map<String, dynamic>? requestHeaders,
     Key? key,
@@ -70,44 +82,44 @@ class StoryVideo extends StatefulWidget {
   }
 
   @override
-  State<StatefulWidget> createState() {
-    return StoryVideoState();
-  }
+  State<StatefulWidget> createState() => _StoryVideoState();
 }
 
-class StoryVideoState extends State<StoryVideo> {
-  Future<void>? playerLoader;
-
+class _StoryVideoState extends State<StoryVideo> {
   StreamSubscription? _streamSubscription;
-
   VideoPlayerController? playerController;
 
   @override
   void initState() {
     super.initState();
 
-    widget.storyController!.pause();
+    widget.storyController?.pause();
 
     widget.videoLoader.loadVideo(() {
       if (widget.videoLoader.state == LoadState.success) {
-        this.playerController =
-            VideoPlayerController.file(widget.videoLoader.videoFile!);
+        if (!kIsWeb && widget.videoLoader.videoFile != null) {
+          playerController = VideoPlayerController.file(
+            widget.videoLoader.videoFile!,
+          );
+        } else {
+          playerController = VideoPlayerController.networkUrl(
+            Uri.parse(widget.videoLoader.url),
+            httpHeaders: (widget.videoLoader.requestHeaders ?? {}).cast<String, String>(),
+          );
+        }
 
-        playerController!.initialize().then((v) {
+        playerController!.initialize().then((_) {
           setState(() {});
-          widget.storyController!.play();
+          widget.storyController?.play();
         });
 
-        if (widget.storyController != null) {
-          _streamSubscription =
-              widget.storyController!.playbackNotifier.listen((playbackState) {
-            if (playbackState == PlaybackState.pause) {
-              playerController!.pause();
-            } else {
-              playerController!.play();
-            }
-          });
-        }
+        _streamSubscription = widget.storyController?.playbackNotifier.listen((playbackState) {
+          if (playbackState == PlaybackState.pause) {
+            playerController?.pause();
+          } else {
+            playerController?.play();
+          }
+        });
       } else {
         setState(() {});
       }
@@ -116,7 +128,7 @@ class StoryVideoState extends State<StoryVideo> {
 
   Widget getContentView() {
     if (widget.videoLoader.state == LoadState.success &&
-        playerController!.value.isInitialized) {
+        (playerController?.value.isInitialized ?? false)) {
       return Center(
         child: AspectRatio(
           aspectRatio: playerController!.value.aspectRatio,
@@ -125,9 +137,10 @@ class StoryVideoState extends State<StoryVideo> {
       );
     }
 
-    return widget.videoLoader.state == LoadState.loading
-        ? Center(
-            child: widget.loadingWidget?? Container(
+    if (widget.videoLoader.state == LoadState.loading) {
+      return Center(
+        child: widget.loadingWidget ??
+            const SizedBox(
               width: 70,
               height: 70,
               child: CircularProgressIndicator(
@@ -135,22 +148,24 @@ class StoryVideoState extends State<StoryVideo> {
                 strokeWidth: 3,
               ),
             ),
-          )
-        : Center(
-            child: widget.errorWidget?? Text(
+      );
+    }
+
+    return Center(
+      child: widget.errorWidget ??
+          const Text(
             "Media failed to load.",
-            style: TextStyle(
-              color: Colors.white,
-            ),
-          ));
+            style: TextStyle(color: Colors.white),
+          ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Container(
       color: Colors.black,
-      height: double.infinity,
       width: double.infinity,
+      height: double.infinity,
       child: getContentView(),
     );
   }
